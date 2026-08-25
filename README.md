@@ -35,7 +35,17 @@ The runner flags that as `suspectNoToolCall`. The doctrine treats a flagged resu
 fabricated until you prove otherwise — by opening the files and running the proof
 command yourself.
 
-The second defence is prompt design: **ask for something the model cannot know.**
+**A second tell had to be added for Cursor**, and it is the more useful one. Measured
+live: a shell command dispatched without `--force` comes back `rejected` — five
+attempts, every one refused — while the process still exits **0** with
+`subtype: "success"` and `is_error: false`. The task made five tool calls, so the
+zero-tool-call flag never fires, and nothing in the machine-readable result says the
+work was blocked. Only the event stream knows:
+
+> **`rejectedToolCalls > 0` ⇒ the environment refused the work. The answer describes
+> something that never ran.**
+
+The third defence is prompt design: **ask for something the model cannot know.**
 Exact line numbers. Strings copied character-for-character. The real output of a
 command. There is nothing to guess, so the only way to answer is to actually look.
 
@@ -164,9 +174,12 @@ state and the proof command, nothing else.
 
 ## The model is pinned
 
-`grok-4.6[effort=high,fast=true]` — high reasoning effort, fast output. Cursor
-expresses effort and speed as bracket parameters on the model id; the CLI documents
-the form itself (`--model 'claude-opus-4-8[context=1m,effort=high,fast=false]'`).
+`cursor-grok-4.6-high-fast` — Grok 4.6 at high reasoning effort, fast output.
+
+Cursor bakes effort and speed into the model slug itself. There is no `--effort` flag,
+and the bracket form the `--help` text advertises is not how these ids are written —
+`agent --list-models` gives the real ones
+(`cursor-grok-4.6-{low,medium,high,xhigh}[-fast]`).
 
 The runner **refuses** a per-task `model` or `effort` field rather than ignoring it.
 A silently dropped override is exactly the class of failure this thing exists to
@@ -180,7 +193,7 @@ Each of these would otherwise be a silent no-op that still reports success:
 
 | | |
 |---|---|
-| **`force` or it did not happen.** Anything that writes or runs a command needs `permissionMode: "force"` (`--force`). Without it the agent must ask for approval, and headless there is nobody to ask. | Writing modes are **refused** under any other permission mode. |
+| **`force` or it did not happen.** Measured: without `--force`, edits still land — but **every shell command is rejected**, and the run still reports success. Any task with a proof command is worthless without it. | Writing modes are **refused** under any other permission mode, and rejections are counted and reported. |
 | **Read means read.** A `read` task under `--force` has nothing stopping it from editing files. | `mode: "read"` is **refused** under `permissionMode: "force"`. |
 | **No fake knobs.** Cursor has no `--max-turns`, no `--json-schema`, no `--prompt-file`. | A `maxTurns` field is **refused** with an explanation, not quietly dropped. |
 | **Structured output is a contract, not a hope.** With no `--json-schema` flag, the runner appends the schema to the prompt, then parses and checks the answer on the way back. | A miss is status `schema-mismatch` with the specific problem — never a half-parsed object. |
@@ -188,30 +201,49 @@ Each of these would otherwise be a silent no-op that still reports success:
 
 ---
 
-## What is tested, and what is not
+## What was measured
 
-**Tested end-to-end** against a stub CLI that speaks the real event format: tool-call
-counting, the suspect flag, JSON extraction (fenced and prose-wrapped), schema
-checking, the dependency scheduler including `skipped` and `afterAny`, per-task
-timeouts with process-group kill, non-zero exits, and every refusal path.
+Run live against a real account (Cursor CLI `2026.08.11-e8db854`,
+`cursor-grok-4.6-high-fast`). Each of these silently breaks a naive integration:
 
-**Verified against the shipped Cursor binary** (`2026.08.11-e8db854`): `--allowed-tools`,
-`--exclude-tools`, `--system-prompt`, `--single-turn` and `--new-session-id` exist but
-are hidden; `--max-turns`, `--json-schema`, `--prompt-file`, `--deny` and
-`--no-subagents` do not exist at all. The result event's shape was read out of the
-shipped bundle.
+1. **Without `--force`, edits execute but shell commands are rejected** — five
+   attempts, every one refused, process still exits 0 with `subtype: "success"`.
+2. **The subagent's `PATH` is not yours.** Cursor's bundled Node shadows your own: a
+   subagent reported `node --version` as `v24.5.0` where the parent shell had
+   `v24.12.0`. It really had run the command — the answer was correct *for its
+   environment*. **This looks exactly like fabrication if you do not check.** Pin the
+   toolchain by absolute path in any proof command that depends on the version.
+3. **Subagents inherit your harness's rules and skills** as workspace context. One
+   dispatch spent a read on `~/.claude/skills/cursor-w/SKILL.md` before starting its
+   real job.
+4. **`--exclude-workspace-context` is server-gated.** Without the entitlement *every*
+   task dies with `[invalid_argument] Workspace context exclusion is not allowed for
+   this user, team, or selected model`. So `stripWorkspaceContext` is opt-in.
+5. **`tool_call` events come in `started`/`completed` pairs** — the runner counts
+   starts, so `toolCalls` is the real number.
+6. **`--mode ask` genuinely reads files:** asked for a random 20-character token and
+   its line number, it returned both character-exact.
+7. **Resume works headless and keeps context:** a corrective round extended the file
+   the session had created earlier, without being told the path again.
+8. **These flags do not exist:** `--max-turns`, `--json-schema`, `--prompt-file`,
+   `--deny`, `--no-subagents`. Hidden but real: `--allowed-tools`, `--exclude-tools`
+   (both "internal only", taking protobuf field names), `--system-prompt`,
+   `--single-turn`, `--new-session-id`.
 
-**Not yet proven**, because it needs an authenticated account — confirm on your first
-real wave: that `grok-4.6[effort=high,fast=true]` is accepted (`agent --list-models`);
-that `--mode ask` grounds a read task in the files rather than refusing to use tools;
-that `tool_call` events carry the lifecycle `subtype` the runner assumes; and this
-model's fabrication rate under this CLI. Until then the doctrine is inherited from
-grok-w's measurements, not re-measured here.
+**On fabrication:** across the live tasks run here — reads, writes, a blind verifier,
+a corrective round — nothing was fabricated. Every claim matched disk. That is a small
+sample on a different CLI than grok-w measured, so the doctrine stands as inherited,
+not re-confirmed. **Keep verifying.** The one result that looked like fabrication was
+finding 2, and it was the environment, not the model.
 
-The POSIX paths are exercised on Linux. Windows follows standard Node behaviour but
-has not been run.
+The runner itself is additionally tested against a stub CLI replaying real event
+streams: tool-call and rejection counting, the suspect flag, JSON extraction (fenced
+and prose-wrapped), schema checking, the dependency scheduler including `skipped` and
+`afterAny`, per-task timeouts with process-group kill, non-zero exits, and every
+refusal path.
 
----
+POSIX paths are exercised on Linux. Windows follows standard Node behaviour but has
+not been run.
 
 ## License
 

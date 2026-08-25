@@ -39,9 +39,10 @@ export const meta = {
 //   or   'C:\\Users\\you\\.claude\\skills\\cursor-w\\cursor-fan.mjs'
 const RUNNER_DEFAULT = ''
 
-// Standing rule, not a tunable. Cursor puts effort and speed in the model id.
-// The runner pins the same value and refuses per-task overrides.
-const WORKER_MODEL = 'grok-4.6[effort=high,fast=true]'
+// Standing rule, not a tunable. Cursor bakes effort and speed into the model slug
+// itself (see `agent --list-models`). The runner pins the same value and refuses
+// per-task overrides.
+const WORKER_MODEL = 'cursor-grok-4.6-high-fast'
 
 // ---------- input ----------
 const input = typeof args === 'string' ? { goal: args } : (args || {})
@@ -258,8 +259,9 @@ const workerPrompt = (item, round) => [
   `node "${RUNNER}" --tasks-file "<workdir>/${item.id}.json" --out-dir "<workdir>/${item.id}-out" --default-cwd "<worktree>" --max-parallel 2`,
   '```',
   ``,
-  `The runner defaults to --permission-mode force, which is the ONLY mode where the subagent's edits and`,
-  `terminal commands actually execute. Do not override it; it refuses writing modes under any other mode.`,
+  `The runner defaults to --permission-mode force. Measured: without it, edits still land but EVERY shell`,
+  `command is rejected while the run still reports success — so a proof command is worthless without it.`,
+  `Do not override it; the runner refuses writing modes under any other mode.`,
   `The model is pinned inside the runner (${WORKER_MODEL}); there is nothing to pass.`,
   ``,
   `## Step 2 — the verifier must be BLIND`,
@@ -277,7 +279,10 @@ const workerPrompt = (item, round) => [
   `- run the PROOF command yourself and capture its real output. Never report a proof you did not run.`,
   `- compare the writer's claimed file list against git. A claim with no matching change on disk means`,
   `  fabrication: set suspectFabrication true and treat the round as failed regardless of what it said.`,
-  `- check toolCalls and suspectNoToolCall in _summary.json for the "-write" task.`,
+  `- check toolCalls, rejectedToolCalls and suspectNoToolCall in _summary.json for the "-write" task.`,
+  `  rejectedToolCalls > 0 means the environment refused the work, no matter what the report says.`,
+  `- the subagent's PATH is not yours: Cursor's bundled Node shadows your own. If the proof depends on a`,
+  `  toolchain version, pin it by absolute path.`,
   ``,
   `## Step 4 — resume loop (max 2 rounds)`,
   ``,

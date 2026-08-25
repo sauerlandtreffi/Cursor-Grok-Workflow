@@ -48,9 +48,13 @@ directory, that is fine: nothing here depends on being installed. Point yourself
    node cursor-fan.mjs --tasks-file wave.json --out-dir wave-out --default-cwd /abs/path/to/project
    ```
    The runner parallelizes. Never fan out at your own tool level.
-4. **Read `wave-out/_summary.json` FIRST.** A task with `suspectNoToolCall: true`
-   (that is, `toolCalls == 0`) made zero tool calls: if it needed to look at anything,
-   the answer is fabricated until you prove otherwise.
+4. **Read `wave-out/_summary.json` FIRST.** Two flags decide whether a result is even
+   worth reading:
+   - `suspectNoToolCall: true` (`toolCalls == 0`) — it never looked at anything. If the
+     task needed to, the answer is fabricated until you prove otherwise.
+   - `rejectedToolCalls > 0` — the environment **refused** the work. Measured: a shell
+     command without `--force` is rejected while the run still reports success with
+     exit 0. The answer describes something that never ran.
 5. **Verify yourself.** Open the files. Run the proof command. Act only on
    `structuredOutput`, never on prose.
 
@@ -62,9 +66,10 @@ directory, that is fine: nothing here depends on being installed. Point yourself
    conservative reading — you cannot ask questions."*
 2. **Ask for the unguessable.** Exact line numbers, character-exact strings, real
    command output. That is what makes fabrication impossible instead of merely unlikely.
-3. **`permissionMode: "force"` for anything that writes or runs commands.** The runner
-   refuses writing modes without it, because without it nothing reaches the disk while
-   the task still reports an answer.
+3. **`permissionMode: "force"` for anything that writes or runs commands.** Measured:
+   without it, edits still land but *every shell command is rejected* — and the run
+   still reports success. Any task with a proof command is worthless without it. The
+   runner refuses writing modes without it.
 4. **Never verify by asking another subagent** — with one exception: a *blind*
    verifier that has never seen the writer's claims. Run the proof command yourself
    regardless.
@@ -82,7 +87,8 @@ directory, that is fine: nothing here depends on being installed. Point yourself
 | Corrective round | `resumeSessionId: "<sessionId from _summary.json>"` — keeps context, so state only what is wrong |
 | Statuses | `ok` · `schema-mismatch` · `skipped` · `unparsable` · `failed` · `timeout` |
 | Refused fields | `model`, `effort` (pinned), `maxTurns` (no such flag in this CLI) |
+| Watch out | the subagent's `PATH` is not yours — Cursor's bundled Node shadows your own. Pin the toolchain by absolute path in proof commands that depend on a version. |
 | Binary override | env `CURSOR_AGENT_ENTRY` |
 
 Full field reference, the writer + blind-verifier pattern, the prompt template, and
-what is measured versus assumed: **`SKILL.md`**.
+the nine measured CLI behaviours that break naive integrations: **`SKILL.md`**.

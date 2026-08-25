@@ -1,6 +1,6 @@
 ---
 name: cursor-w
-description: Cursor Agent CLI subagents do the labour (pinned grok-4.6, high effort, fast); the invoking agent orchestrates and owns every judgement. Use whenever the user's message contains "Cursor-W", "cursor-w", "CursorW", "/cursor-w" or "Cursor-Grok-Workflow", any casing, anywhere. Shapes: single call, wave of up to 10 tasks via cursor-fan.mjs, or the cursor-fanout pipeline (Workflow tool).
+description: Cursor Agent CLI subagents do the labour (pinned cursor-grok-4.6-high-fast); the invoking agent orchestrates and owns every judgement. Use whenever the user's message contains "Cursor-W", "cursor-w", "CursorW", "/cursor-w" or "Cursor-Grok-Workflow", any casing, anywhere. Shapes: single call, wave of up to 10 tasks via cursor-fan.mjs, or the cursor-fanout pipeline (Workflow tool).
 ---
 
 # Cursor-W — orchestrated Cursor fan-out
@@ -57,7 +57,17 @@ event per tool call, so this runner counts the thing itself and reports it as
 > **`toolCalls == 0` on a task that needed to look at the world ⇒ treat the answer as
 > fabricated until you have checked it yourself.**
 
-The second defence is prompt design: **ask for something the model cannot know.**
+**There is a second tell, and it is the one this port had to add.** Measured here: a
+shell command dispatched without `--force` comes back `rejected` — five attempts, all
+refused — while the process still exits **0** with `subtype: "success"` and
+`is_error: false`. Nothing in the machine-readable result says the work was blocked,
+and the task made five tool calls, so the zero-tool-call flag never fires. The event
+stream is the only place the truth appears, so the runner counts it:
+
+> **`rejectedToolCalls > 0` ⇒ the environment refused the work. The answer describes
+> something that never ran.**
+
+The third defence is prompt design: **ask for something the model cannot know.**
 Exact line numbers, exact strings copied character-for-character, the real output of
 a command. There is nothing to guess, so the only way to answer is to actually look.
 
@@ -80,7 +90,8 @@ wave.json = [ { id, prompt, mode: read|plan|write|shell|full, cwd, after, afterA
 cursor-fan.mjs — ≤10 parallel `agent` processes, honours `after`, enforces the model pin
   │              writer (mode full) ──after──► blind verifier (never sees writer's output)
   ▼
-outdir/  _summary.json      status, toolCalls, suspectNoToolCall, sessionId — read FIRST
+outdir/  _summary.json      status, toolCalls, rejectedToolCalls, suspectNoToolCall,
+                            sessionId — read FIRST
          <id>.json          structuredOutput = the only field to act on
          <id>.stream.jsonl  the raw event stream — the evidence of what it really did
          <id>.err.txt       _prompts/<id>.txt
@@ -90,14 +101,17 @@ ORCHESTRATOR verifies: open the files, run the proof command itself.
 toolCalls==0 ⇒ fabricated ⇒ corrective round via resumeSessionId (max 2, then do it yourself)
 ```
 
-## The worker is fixed: grok-4.6, high effort, fast
+## The worker is fixed: `cursor-grok-4.6-high-fast`
 
-Standing instruction, enforced by the runner: the model is
-`grok-4.6[effort=high,fast=true]`, and per-task `model` / `effort` fields are
-**refused** rather than ignored. Cursor expresses effort and speed as bracket
-parameters on the model id — the CLI documents the form itself
-(`--model 'claude-opus-4-8[context=1m,effort=high,fast=false]'`). Never downgrade
-for "cheap mechanical" work.
+Standing instruction, enforced by the runner. Per-task `model` / `effort` fields are
+**refused** rather than ignored.
+
+Cursor bakes effort and speed into the model slug itself; there are no `--effort` or
+`--fast` flags, and the bracket-parameter form the `--help` text advertises
+(`model[effort=high,fast=true]`) is not how these ids are written. Get the real list
+from `agent --list-models` — the Grok family is
+`cursor-grok-4.6-{low,medium,high,xhigh}` with an optional `-fast` suffix. Never
+downgrade for "cheap mechanical" work.
 
 ## Hard rules
 
@@ -105,8 +119,9 @@ for "cheap mechanical" work.
    absolute paths, what to read first, the exact task, acceptance criteria, output
    contract. (Exception: `resumeSessionId` continues a real session.)
 2. **`force` or it did not happen** — runner-enforced. Anything that writes or runs
-   a command needs `permissionMode: "force"`; without it the agent must ask for
-   approval, and headless there is nobody to ask.
+   a command needs `permissionMode: "force"`. Measured: without it, *edits still go
+   through*, but **every shell command is rejected** — and the run still reports
+   success. Any task with a proof command is therefore worthless without `force`.
 3. **Read means read** — runner-enforced from the other side: `mode: "read"` may not
    run under `force`, because then nothing keeps it read-only.
 4. **Writers must be disjoint.** Same-file writers must be sequenced with `after`.
@@ -128,7 +143,7 @@ verify substance yourself → integrate and report what you rejected and why.
 For review-shaped jobs slice by **dimension** (correctness, performance, API contract,
 test coverage), not by file, each with a schema.
 
-Statuses: `ok` (still check `suspectNoToolCall`) · `schema-mismatch` (the answer did
+Statuses: `ok` (still check `suspectNoToolCall` **and** `rejectedToolCalls`) · `schema-mismatch` (the answer did
 not match the contract — read `schemaProblems`) · `skipped` (dependency not ok) ·
 `unparsable` (no result event; treat as failed) · `failed` / `timeout` (read
 `<id>.err.txt` and `<id>.stream.jsonl`).
@@ -144,8 +159,8 @@ node <skill dir>/cursor-fan.mjs \
 Options: `--permission-mode` (default `force`; the default for `read`/`plan` tasks is
 derived from the mode) · `--timeout-sec` (default 1800 per task) · `--dry-run` (print
 the exact command lines, spend nothing) · `--model` (accepts only the pinned value —
-passing anything else fails) · env `CURSOR_AGENT_ENTRY` overrides the binary
-auto-detection. Exit 1 if any task did not end `ok` — read `_summary.json` regardless.
+passing anything else fails) · `--strip-workspace-context` (see the task table) · env
+`CURSOR_AGENT_ENTRY` overrides the binary auto-detection. Exit 1 if any task did not end `ok` — read `_summary.json` regardless.
 
 ## Task file — a JSON array of task objects
 
@@ -159,6 +174,7 @@ auto-detection. Exit 1 if any task did not end `ok` — read `_summary.json` reg
 | `timeoutSec` | per-task wall clock; defaults to `--timeout-sec` |
 | `resumeSessionId`, `continueSession` | corrective rounds (`sessionId` from `_summary.json`) |
 | `permissionMode` | `force` / `autoReview` / `readonly` / `plan` — writing modes must stay `force` |
+| `stripWorkspaceContext` | strip the harness's own rules and skills from the subagent's context. **Opt-in and server-gated** — see below |
 | `sandbox`, `systemPrompt`, `excludeTools`, `approveMcps` | pass-through overrides; see the caveats below |
 | `model`, `effort`, `maxTurns` | **refused** — the first two are pinned, the third does not exist in this CLI |
 
@@ -214,25 +230,52 @@ calling session, the worker is pinned. `cursor-fanout.js` needs `RUNNER_DEFAULT`
 tool, run the equivalent by hand: freeze specs, dispatch writer + blind-verifier
 waves, review each diff yourself.
 
-## What is verified, and what is assumed
+## Measured behaviour (Cursor CLI 2026.08.11-e8db854 / cursor-grok-4.6-high-fast)
 
-The runner's own machinery is tested end-to-end against a stub CLI that speaks the
-real event format: tool-call counting, the suspect flag, JSON extraction (fenced and
-prose-wrapped), schema checking, the dependency scheduler including `skipped` and
-`afterAny`, per-task timeouts with process-group kill, non-zero exits, and every
-refusal path. Cursor's own flags were verified against the shipped binary
-(`2026.08.11-e8db854`): `--allowed-tools`, `--exclude-tools`, `--system-prompt`,
-`--single-turn` and `--new-session-id` exist but are hidden; `--max-turns`,
-`--json-schema`, `--prompt-file`, `--deny` and `--no-subagents` **do not exist**. The
-result event's shape (`type`, `subtype`, `is_error`, `result`, `session_id`,
-`request_id`, `usage`, `duration_ms`) was read out of the shipped bundle.
+Run live against a real account. Each of these silently breaks a naive integration:
 
-Still unproven, because it needs an authenticated account — confirm on your first
-real wave: that `grok-4.6[effort=high,fast=true]` is accepted (`agent --list-models`);
-that `--mode ask` grounds a read task in the files rather than refusing to use tools;
-that `tool_call` events carry the `subtype` lifecycle this runner assumes; and the
-fabrication rate of this model under this CLI. Until then, treat the doctrine above
-as inherited from grok-w's measurements, not re-measured here.
+1. **Without `--force`, edits execute but shell commands are rejected.** Five
+   attempts, every one refused, and the process still exits 0 with
+   `subtype: "success"` and `is_error: false`. The runner surfaces this as
+   `rejectedToolCalls` and refuses writing modes without `force` in the first place.
+2. **The subagent's `PATH` is not yours.** Cursor's bundled Node shadows the one on
+   your shell's `PATH`: a subagent running `node --version` reported `v24.5.0` where
+   the parent shell had `v24.12.0`. It had genuinely run the command — the answer was
+   correct *for its environment*. **This looks exactly like fabrication if you do not
+   check.** Pin the toolchain by absolute path in any proof command whose result
+   depends on the version.
+3. **Subagents inherit the harness's own rules and skills** as workspace context. One
+   dispatch spent a read on `~/.claude/skills/cursor-w/SKILL.md` before starting its
+   actual job — context you never put in the frozen spec.
+4. **`--exclude-workspace-context` is server-gated.** On an account without the
+   entitlement, *every* task dies: `[invalid_argument] Workspace context exclusion is
+   not allowed for this user, team, or selected model`. Hence `stripWorkspaceContext`
+   is opt-in — verify your account accepts it on one task before using it on a wave.
+5. **`tool_call` events come in `started` / `completed` pairs.** The runner counts
+   starts, so `toolCalls` is the number of real calls, not double.
+6. **`--mode ask` genuinely reads files.** Asked for a random 20-character token and
+   its line number, it returned both character-exact.
+7. **Resume works headless and keeps context.** `resumeSessionId` continued a writer
+   session that then extended the file it had created earlier — without being told the
+   path again. Corrective rounds state only what is wrong.
+8. **Effort and speed live in the model slug**, not in flags or bracket parameters:
+   `cursor-grok-4.6-{low,medium,high,xhigh}[-fast]`, per `agent --list-models`.
+9. **The flags that do not exist:** `--max-turns`, `--json-schema`, `--prompt-file`,
+   `--deny`, `--no-subagents`. Hidden but real: `--allowed-tools`, `--exclude-tools`
+   (both "internal only", taking protobuf field names), `--system-prompt`,
+   `--single-turn`, `--new-session-id`.
+
+**On fabrication:** across the live tasks run here — reads, writes, a blind verifier,
+a corrective round — nothing was fabricated. Every claim matched disk. That is a small
+sample on a different CLI than grok-w measured, so the doctrine stands as inherited,
+not as re-confirmed: **keep verifying.** The one result that looked like fabrication
+was finding 2, and it was the environment, not the model.
+
+The runner's own machinery is additionally tested against a stub CLI that replays real
+event streams: tool-call and rejection counting, the suspect flag, JSON extraction
+(fenced and prose-wrapped), schema checking, the dependency scheduler including
+`skipped` and `afterAny`, per-task timeouts with process-group kill, non-zero exits,
+and every refusal path.
 
 ## Platform notes
 

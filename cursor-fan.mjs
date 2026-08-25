@@ -22,16 +22,17 @@ import path from 'node:path'
 
 const WIN = process.platform === 'win32'
 
-// Standing instruction: grok-4.6, high effort, fast. Cursor expresses effort and
-// speed as bracket parameters on the model id, not as separate flags — the CLI
-// documents the form itself: --model 'claude-opus-4-8[context=1m,effort=high,fast=false]'.
-const MODEL = 'grok-4.6[effort=high,fast=true]'
+// Standing instruction: Grok 4.6 at high effort, fast. Cursor bakes effort and speed
+// into the model slug itself rather than exposing them as flags; the exact ids come
+// from `agent --list-models` (cursor-grok-4.6-{low,medium,high,xhigh}[-fast]).
+const MODEL = 'cursor-grok-4.6-high-fast'
 
 // ---- CLI ------------------------------------------------------------------
 const opts = {
   tasksFile: null, outDir: null, defaultCwd: process.cwd(),
   maxParallel: 10, model: MODEL,
   permissionMode: 'force', timeoutSec: 1800, dryRun: false,
+  stripWorkspaceContext: false,
 }
 {
   const argv = process.argv.slice(2)
@@ -46,6 +47,7 @@ const opts = {
       case '--permission-mode': opts.permissionMode = take(i); i++; break
       case '--timeout-sec': opts.timeoutSec = parseInt(take(i), 10); i++; break
       case '--dry-run': opts.dryRun = true; break
+      case '--strip-workspace-context': opts.stripWorkspaceContext = true; break
       default: fail(`unknown option: ${argv[i]}`)
     }
   }
@@ -123,7 +125,7 @@ for (const t of tasks) {
   // Refuse instead of ignore: a silently dropped field is exactly the class of
   // failure this runner exists to prevent.
   if (t.model != null) fail(`task '${t.id}': per-task 'model' is not allowed. Cursor-W runs ${MODEL} exclusively; remove the field.`)
-  if (t.effort != null) fail(`task '${t.id}': per-task 'effort' is not allowed. Effort is part of the pinned model id (${MODEL}); remove the field.`)
+  if (t.effort != null) fail(`task '${t.id}': per-task 'effort' is not allowed. Effort is baked into the pinned model id (${MODEL}); remove the field.`)
   if (t.maxTurns != null) fail(`task '${t.id}': 'maxTurns' has no equivalent in the Cursor CLI — there is no --max-turns flag. Bound the task with 'timeoutSec'/--timeout-sec and a narrower slice instead; remove the field.`)
   seen.add(t.id)
 }
@@ -262,6 +264,14 @@ for (const t of tasks) {
   else if (permMode === 'autoReview') args.push('--auto-review')
   else if (permMode === 'readonly') args.push('--mode', 'ask')
   else if (permMode === 'plan') args.push('--plan')
+  // Measured: a subagent loads the harness's own rules and skills as workspace context —
+  // one dispatch here spent a read on ~/.claude/skills/cursor-w/SKILL.md before doing its
+  // actual job. Stripping that would suit a frozen spec, but --exclude-workspace-context is
+  // SERVER-GATED: on an account without the entitlement every task dies with
+  // "[invalid_argument] Workspace context exclusion is not allowed for this user, team, or
+  // selected model". So it is opt-in, and you must confirm your account accepts it.
+  const strip = t.stripWorkspaceContext != null ? !!t.stripWorkspaceContext : opts.stripWorkspaceContext
+  if (strip) args.push('--exclude-workspace-context')
   if (t.sandbox) args.push('--sandbox', String(t.sandbox))
   if (t.systemPrompt) args.push('--system-prompt', String(t.systemPrompt))
   if (t.excludeTools) args.push('--exclude-tools', String(t.excludeTools))
@@ -272,7 +282,7 @@ for (const t of tasks) {
   args.push(prompt)
 
   plan.push({
-    id: t.id, mode, cwd, permMode, after: afterOf(t), afterAny: !!t.afterAny,
+    id: t.id, mode, cwd, permMode, strippedWorkspaceContext: strip, after: afterOf(t), afterAny: !!t.afterAny,
     schema: t.schema || null, timeoutSec: t.timeoutSec ? parseInt(t.timeoutSec, 10) : opts.timeoutSec, args,
     outFile: path.join(opts.outDir, `${t.id}.json`),
     streamFile: path.join(opts.outDir, `${t.id}.stream.jsonl`),
@@ -319,6 +329,18 @@ function digest(streamText) {
   // fall back to raw count if this build does not use subtypes.
   const started = toolEvents.filter(e => e.subtype === 'started')
   const toolCalls = started.length || toolEvents.length
+  // The second tell, and the one the inherited doctrine misses. Measured: a shell
+  // command without --force comes back `rejected` — five times over — while the
+  // process still exits 0 with subtype "success" and is_error false. The task made
+  // plenty of tool calls, so the zero-tool-call flag never fires, and nothing in the
+  // machine-readable result says the work was blocked. The stream does.
+  const rejected = toolEvents.filter(e => {
+    if (e.subtype !== 'completed' || !e.tool_call) return false
+    const inner = e.tool_call[Object.keys(e.tool_call)[0]]
+    return !!(inner && inner.result && inner.result.rejected)
+  })
+  const rejectedToolCalls = rejected.length
+  const rejectedToolNames = [...new Set(rejected.map(e => Object.keys(e.tool_call)[0]))]
   const names = [...new Set(toolEvents.map(e => {
     if (typeof e.name === 'string') return e.name
     if (e.tool_call && typeof e.tool_call === 'object') return Object.keys(e.tool_call)[0]
@@ -326,7 +348,7 @@ function digest(streamText) {
   }).filter(Boolean))]
   const result = [...events].reverse().find(e => e && e.type === 'result') || null
   const assistantTurns = events.filter(e => e && e.type === 'assistant').length
-  return { events, toolCalls, toolNames: names, result, assistantTurns, eventCount: events.length }
+  return { events, toolCalls, toolNames: names, rejectedToolCalls, rejectedToolNames, result, assistantTurns, eventCount: events.length }
 }
 
 function runTask(item) {
@@ -375,8 +397,10 @@ function runTask(item) {
       const record = {
         id: item.id, status, exitCode: code, seconds: secs,
         mode: item.mode, permissionMode: item.permMode, cwd: item.cwd,
+        strippedWorkspaceContext: item.strippedWorkspaceContext,
         subtype: d.result ? d.result.subtype ?? null : null,
         isError, toolCalls: d.toolCalls, toolNames: d.toolNames,
+        rejectedToolCalls: d.rejectedToolCalls, rejectedToolNames: d.rejectedToolNames,
         assistantTurns: d.assistantTurns, eventCount: d.eventCount,
         suspectNoToolCall: suspect,
         sessionId: d.result ? d.result.session_id ?? null : null,
@@ -393,8 +417,9 @@ function runTask(item) {
       // asked for, the parsed object. structuredOutput is the only field to act on.
       writeFileSync(item.outFile, JSON.stringify({ ...record, result: text, structuredOutput: structured }, null, 2), 'utf8')
 
-      const marker = status === 'ok' ? (suspect ? 'OK? ' : 'OK  ') : 'FAIL'
-      console.log(`  <- ${marker} [${item.id}] exit=${code} tools=${d.toolCalls} ${secs}s${status !== 'ok' ? ` status=${status}` : ''}`)
+      const marker = status === 'ok' ? (suspect || d.rejectedToolCalls ? 'OK? ' : 'OK  ') : 'FAIL'
+      const rej = d.rejectedToolCalls ? ` rejected=${d.rejectedToolCalls}` : ''
+      console.log(`  <- ${marker} [${item.id}] exit=${code} tools=${d.toolCalls}${rej} ${secs}s${status !== 'ok' ? ` status=${status}` : ''}`)
       resolve()
     })
     proc.on('error', (err) => {
@@ -403,6 +428,7 @@ function runTask(item) {
         id: item.id, status: 'failed', exitCode: null, seconds: 0,
         mode: item.mode, permissionMode: item.permMode, cwd: item.cwd,
         subtype: `spawn error: ${err.message}`, isError: true, toolCalls: 0, toolNames: [],
+        rejectedToolCalls: 0, rejectedToolNames: [],
         assistantTurns: 0, eventCount: 0, suspectNoToolCall: false,
         sessionId: null, requestId: null, usage: null, durationMs: null,
         schemaProblems: null, streamFile: null, outputFile: null, errorFile: null,
@@ -428,7 +454,8 @@ while (pending.length > 0 || running.size > 0) {
         id: item.id, status: 'skipped', exitCode: null, seconds: 0,
         mode: item.mode, permissionMode: item.permMode, cwd: item.cwd,
         subtype: `dependency '${deadDep}' ended ${results[deadDep].status}`, isError: false,
-        toolCalls: 0, toolNames: [], assistantTurns: 0, eventCount: 0,
+        toolCalls: 0, toolNames: [], rejectedToolCalls: 0, rejectedToolNames: [],
+        assistantTurns: 0, eventCount: 0,
         suspectNoToolCall: false, sessionId: null, requestId: null, usage: null,
         durationMs: null, schemaProblems: null, streamFile: null, outputFile: null,
         errorFile: null, after: item.after,
@@ -456,17 +483,19 @@ const summary = {
   ok: Object.values(results).filter(r => r.status === 'ok').length,
   failed: Object.values(results).filter(r => r.status !== 'ok').length,
   suspect: Object.values(results).filter(r => r.suspectNoToolCall).length,
+  rejected: Object.values(results).filter(r => r.rejectedToolCalls > 0).length,
   tasks: plan.map(p => results[p.id]),
 }
 const summaryPath = path.join(opts.outDir, '_summary.json')
 writeFileSync(summaryPath, JSON.stringify(summary, null, 2), 'utf8')
 
 console.log('')
-console.log(`cursor-w: done in ${summary.totalSeconds}s -- ${summary.ok} ok, ${summary.failed} failed, ${summary.suspect} suspect`)
+console.log(`cursor-w: done in ${summary.totalSeconds}s -- ${summary.ok} ok, ${summary.failed} failed, ${summary.suspect} suspect, ${summary.rejected} with rejected tool calls`)
 console.log(`cursor-w: summary -> ${summaryPath}`)
 for (const r of summary.tasks) {
   if (r.status === 'schema-mismatch') console.log(`cursor-w: NEEDS ATTENTION [${r.id}] status=schema-mismatch -- ${(r.schemaProblems || []).join('; ')}`)
   else if (r.status !== 'ok') console.log(`cursor-w: NEEDS ATTENTION [${r.id}] status=${r.status} subtype=${r.subtype}`)
   if (r.suspectNoToolCall) console.log(`cursor-w: SUSPECT [${r.id}] toolCalls=0 -- it never looked at anything; treat the answer as fabricated until you verify it yourself`)
+  if (r.rejectedToolCalls > 0) console.log(`cursor-w: BLOCKED [${r.id}] ${r.rejectedToolCalls} tool call(s) rejected (${r.rejectedToolNames.join(', ')}) -- the environment refused the work; the task's answer describes something that never ran`)
 }
 process.exitCode = summary.failed > 0 ? 1 : 0
