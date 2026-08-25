@@ -1,0 +1,4 @@
+node_modules/
+wave-out/
+*-out/
+.DS_Store

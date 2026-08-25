@@ -1,0 +1,247 @@
+---
+name: cursor-w
+description: Cursor Agent CLI subagents do the labour (pinned grok-4.6, high effort, fast); the invoking agent orchestrates and owns every judgement. Use whenever the user's message contains "Cursor-W", "cursor-w", "CursorW", "/cursor-w" or "Cursor-Grok-Workflow", any casing, anywhere. Shapes: single call, wave of up to 10 tasks via cursor-fan.mjs, or the cursor-fanout pipeline (Workflow tool).
+---
+
+# Cursor-W — orchestrated Cursor fan-out
+
+**In one paragraph:** you hand batches of grunt work to up to 10 Cursor Agent CLI
+subagents running Grok in parallel, and you keep every decision. They read, they
+type, they run commands. They do not judge their own work, and neither do you take
+their word for it — the runner records what each one *actually did*, and you check
+the disk yourself. **A subagent result is a proposal, never a fact.**
+
+**Trigger:** any message containing `Cursor-W` (any casing). Typing it *is* the
+opt-in — run the protocol, don't ask.
+
+**Prerequisites:** Node ≥ 18 and the Cursor Agent CLI, authenticated once:
+
+```bash
+curl https://cursor.com/install -fsS | bash    # installs `agent` into ~/.local/bin
+agent login                                    # once, interactive (browser)
+agent status                                   # should print your account
+```
+
+Files in this directory (`<skill dir>`): `cursor-fan.mjs` — the runner ·
+`cursor-fanout.js` — optional Workflow pipeline · `examples/` — two working task files.
+
+## The 60-second version
+
+```bash
+# 1. write a task file
+cat > wave.json <<'EOF'
+[{ "id": "audit", "mode": "read", "cwd": "/abs/path/to/project",
+   "prompt": "CONTEXT\n  Read src/api/*.ts.\n\nTASK\n  List every endpoint with no auth check.\n\nACCEPTANCE\n  For each: file, 1-based line number, and the exact line copied character-for-character.\n\nCONSTRAINTS\n  Do not modify anything. You cannot ask questions.",
+   "schema": { "type": "object", "required": ["findings"],
+     "properties": { "findings": { "type": "array" } } } }]
+EOF
+
+# 2. run the wave
+node <skill dir>/cursor-fan.mjs --tasks-file wave.json --out-dir wave-out
+
+# 3. read wave-out/_summary.json FIRST, then verify the claims against the real files
+```
+
+## Why the verification is the whole point
+
+Upstream (grok-w) measured this on grok-4.6 and it is not hypothetical: **the model
+will report success for work it never performed.** Schema-valid, confident, and wrong
+— a `node --version` it never ran, files it "wrote" that were never on disk, facts
+"extracted" from a file it never opened.
+
+The tell is mechanical: **the task needed a tool call and made none.** grok-w had to
+infer that from a turn counter. Cursor's `stream-json` output emits a `tool_call`
+event per tool call, so this runner counts the thing itself and reports it as
+`toolCalls` plus the `suspectNoToolCall` flag.
+
+> **`toolCalls == 0` on a task that needed to look at the world ⇒ treat the answer as
+> fabricated until you have checked it yourself.**
+
+The second defence is prompt design: **ask for something the model cannot know.**
+Exact line numbers, exact strings copied character-for-character, the real output of
+a command. There is nothing to guess, so the only way to answer is to actually look.
+
+## Map
+
+```
+ORCHESTRATOR (you) · scope → decompose → freeze specs → dispatch → verify → integrate
+  │
+  ├─ Shape 1 · single call     one-task wave — still gives _summary, suspect flag, sessionId
+  ├─ Shape 2 · swarm wave      ≤10 disjoint tasks, dependency-ordered — the workhorse
+  └─ Shape 3 · fanout pipeline (Workflow tool only) plan → harden specs
+                               → per item: writer → blind verifier → proof
+                               → independent diff review → accept / re-plan (≤2 rounds)
+  │
+  ▼
+wave.json = [ { id, prompt, mode: read|plan|write|shell|full, cwd, after, afterAny,
+                schema, timeoutSec, resumeSessionId, … } ]
+  │
+  ▼
+cursor-fan.mjs — ≤10 parallel `agent` processes, honours `after`, enforces the model pin
+  │              writer (mode full) ──after──► blind verifier (never sees writer's output)
+  ▼
+outdir/  _summary.json      status, toolCalls, suspectNoToolCall, sessionId — read FIRST
+         <id>.json          structuredOutput = the only field to act on
+         <id>.stream.jsonl  the raw event stream — the evidence of what it really did
+         <id>.err.txt       _prompts/<id>.txt
+  │
+  ▼
+ORCHESTRATOR verifies: open the files, run the proof command itself.
+toolCalls==0 ⇒ fabricated ⇒ corrective round via resumeSessionId (max 2, then do it yourself)
+```
+
+## The worker is fixed: grok-4.6, high effort, fast
+
+Standing instruction, enforced by the runner: the model is
+`grok-4.6[effort=high,fast=true]`, and per-task `model` / `effort` fields are
+**refused** rather than ignored. Cursor expresses effort and speed as bracket
+parameters on the model id — the CLI documents the form itself
+(`--model 'claude-opus-4-8[context=1m,effort=high,fast=false]'`). Never downgrade
+for "cheap mechanical" work.
+
+## Hard rules
+
+1. **Self-contained prompts.** Subagents share no history with you or each other:
+   absolute paths, what to read first, the exact task, acceptance criteria, output
+   contract. (Exception: `resumeSessionId` continues a real session.)
+2. **`force` or it did not happen** — runner-enforced. Anything that writes or runs
+   a command needs `permissionMode: "force"`; without it the agent must ask for
+   approval, and headless there is nobody to ask.
+3. **Read means read** — runner-enforced from the other side: `mode: "read"` may not
+   run under `force`, because then nothing keeps it read-only.
+4. **Writers must be disjoint.** Same-file writers must be sequenced with `after`.
+5. **Schema for anything you parse**; act on `structuredOutput`, never on prose.
+6. **Ask for the unguessable**, then check `toolCalls`.
+7. **Never verify by asking the same kind of agent** — sole exception: a *blind*
+   verifier that never saw the writer's claims. Run the proof command yourself regardless.
+8. **Never let a subagent block.** End every prompt with: "if something is ambiguous,
+   state it and pick the most conservative reading — you cannot ask questions."
+
+## Protocol
+
+Scope (goal + acceptance in 2–3 lines) → decompose (≤10 disjoint units; every
+implementation unit gets a proof command that **fails loudly on an empty diff**) →
+announce the wave (id, mode, one-line intent) → one runner call per wave (the runner
+parallelizes — never fan out at your own tool level) → triage `_summary.json` →
+verify substance yourself → integrate and report what you rejected and why.
+
+For review-shaped jobs slice by **dimension** (correctness, performance, API contract,
+test coverage), not by file, each with a schema.
+
+Statuses: `ok` (still check `suspectNoToolCall`) · `schema-mismatch` (the answer did
+not match the contract — read `schemaProblems`) · `skipped` (dependency not ok) ·
+`unparsable` (no result event; treat as failed) · `failed` / `timeout` (read
+`<id>.err.txt` and `<id>.stream.jsonl`).
+
+## Running a wave
+
+```bash
+node <skill dir>/cursor-fan.mjs \
+  --tasks-file wave1.json --out-dir wave1-out \
+  --default-cwd /path/to/project --max-parallel 10
+```
+
+Options: `--permission-mode` (default `force`; the default for `read`/`plan` tasks is
+derived from the mode) · `--timeout-sec` (default 1800 per task) · `--dry-run` (print
+the exact command lines, spend nothing) · `--model` (accepts only the pinned value —
+passing anything else fails) · env `CURSOR_AGENT_ENTRY` overrides the binary
+auto-detection. Exit 1 if any task did not end `ok` — read `_summary.json` regardless.
+
+## Task file — a JSON array of task objects
+
+| field | |
+|---|---|
+| `id`, `prompt` | required; `id` filename-safe and unique; `prompt` fully self-contained |
+| `mode` | `read` (default) / `plan` / `write` / `shell` / `full` — pick the narrowest that works |
+| `cwd` | working dir; defaults to `--default-cwd` |
+| `after`, `afterAny` | dependency id(s); `afterAny: true` runs even if the dependency failed (verifiers) |
+| `schema` | JSON Schema → appended as an output contract, then parsed and checked on return |
+| `timeoutSec` | per-task wall clock; defaults to `--timeout-sec` |
+| `resumeSessionId`, `continueSession` | corrective rounds (`sessionId` from `_summary.json`) |
+| `permissionMode` | `force` / `autoReview` / `readonly` / `plan` — writing modes must stay `force` |
+| `sandbox`, `systemPrompt`, `excludeTools`, `approveMcps` | pass-through overrides; see the caveats below |
+| `model`, `effort`, `maxTurns` | **refused** — the first two are pinned, the third does not exist in this CLI |
+
+How a mode becomes flags: `read` → `--mode ask` · `plan` → `--plan` ·
+`write`/`shell`/`full` → `--force`. Scope is enforced by permission mode, not by a
+tool allowlist, because Cursor's `--allowed-tools` / `--exclude-tools` are marked
+"internal only" and take protobuf field names — the same class of trap as a silently
+ignored tool name. If you use `excludeTools`, verify the names took effect in the
+event stream.
+
+### Writer + blind verifier — the core pattern
+
+```json
+[
+  { "id": "fix",        "mode": "full",  "permissionMode": "force", "cwd": "/repo",
+    "prompt": "<frozen spec>" },
+  { "id": "fix-verify", "mode": "shell", "permissionMode": "force", "cwd": "/repo",
+    "after": "fix", "afterAny": true,
+    "prompt": "Inspect the working tree of /repo and run: <proof command>. Judge only what you can observe. Report fail if the work is absent, incomplete, or the command does not pass.",
+    "schema": { "type": "object", "required": ["verdict", "evidence"], "properties": {
+      "verdict": { "type": "string", "enum": ["pass", "fail"] }, "evidence": { "type": "string" } } } }
+]
+```
+
+The verifier prompt gets the acceptance criteria and the proof command — **never the
+writer's report**. The runner never injects a dependency's output into a dependent
+prompt, so blindness holds unless you paste it in yourself.
+
+## Prompt template
+
+```
+CONTEXT      repo root; files in your slice (absolute paths); read these first
+TASK         one precise instruction
+ACCEPTANCE   how it is judged — include something unguessable
+OUTPUT       exact shape, or "follow the output contract at the end of this message"
+CONSTRAINTS  stay in your slice; do not run the full test suite; if something is
+             ambiguous, state it and pick the most conservative reading — you
+             cannot ask questions.
+```
+
+## Shape 3 — fanout pipeline (harness with a `Workflow` tool only)
+
+```
+Workflow({ scriptPath: '<skill dir>/cursor-fanout.js',
+           args: { goal: '<what to build>', repo: '.', maxWorkers: 6, isolation: 'worktree' } })
+```
+
+args: `goal` (required) · `repo` ('.') · `maxWorkers` (6, cap 10) · `maxRounds` (2) ·
+`isolation` (`worktree`; **`none` outside a git repo**) · `specReview` (true). No
+argument selects the orchestrator or the worker model — thinking agents inherit the
+calling session, the worker is pinned. `cursor-fanout.js` needs `RUNNER_DEFAULT` (or
+`args.runner`) set to the absolute path of `cursor-fan.mjs`. Without a `Workflow`
+tool, run the equivalent by hand: freeze specs, dispatch writer + blind-verifier
+waves, review each diff yourself.
+
+## What is verified, and what is assumed
+
+The runner's own machinery is tested end-to-end against a stub CLI that speaks the
+real event format: tool-call counting, the suspect flag, JSON extraction (fenced and
+prose-wrapped), schema checking, the dependency scheduler including `skipped` and
+`afterAny`, per-task timeouts with process-group kill, non-zero exits, and every
+refusal path. Cursor's own flags were verified against the shipped binary
+(`2026.08.11-e8db854`): `--allowed-tools`, `--exclude-tools`, `--system-prompt`,
+`--single-turn` and `--new-session-id` exist but are hidden; `--max-turns`,
+`--json-schema`, `--prompt-file`, `--deny` and `--no-subagents` **do not exist**. The
+result event's shape (`type`, `subtype`, `is_error`, `result`, `session_id`,
+`request_id`, `usage`, `duration_ms`) was read out of the shipped bundle.
+
+Still unproven, because it needs an authenticated account — confirm on your first
+real wave: that `grok-4.6[effort=high,fast=true]` is accepted (`agent --list-models`);
+that `--mode ask` grounds a read task in the files rather than refusing to use tools;
+that `tool_call` events carry the `subtype` lifecycle this runner assumes; and the
+fabrication rate of this model under this CLI. Until then, treat the doctrine above
+as inherited from grok-w's measurements, not re-measured here.
+
+## Platform notes
+
+- `agent --worktree` is for interactive isolation; headless isolation comes from
+  Workflow worktrees or disjoint file partitioning.
+- The runner spawns the CLI directly with an argument array and no shell. On Windows
+  it **refuses** a `.cmd`/`.ps1` shim, because a shim re-parses arguments and would
+  corrupt a multi-line prompt — point `CURSOR_AGENT_ENTRY` at the real executable.
+- There is no `--prompt-file`, so the prompt travels as one argv entry. Keep bulk
+  context in files the subagent reads; the runner refuses prompts over 120k chars.
+- Source of truth: github.com/sauerlandtreffi/Cursor-Grok-Workflow. Ported from
+  github.com/sauerlandtreffi/grok-w.
