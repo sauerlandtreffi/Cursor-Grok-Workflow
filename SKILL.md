@@ -1,6 +1,6 @@
 ---
 name: cursor-w
-description: Cursor Agent CLI subagents do the labour (pinned cursor-grok-4.6-high-fast); the invoking agent orchestrates and owns every judgement. Use whenever the user's message contains "Cursor-W", "cursor-w", "CursorW", "/cursor-w" or "Cursor-Grok-Workflow", any casing, anywhere. Shapes: single call, wave of up to 10 tasks via cursor-fan.mjs, or the cursor-fanout pipeline (Workflow tool).
+description: Cursor Agent CLI subagents do the labour (pinned to the newest Grok, cursor-grok-4.6-high-fast — never Anthropic, OpenAI or any other foreign model); the invoking agent orchestrates and owns every judgement. Use whenever the user's message contains "Cursor-W", "cursor-w", "CursorW", "/cursor-w" or "Cursor-Grok-Workflow", any casing, anywhere. Shapes: single call, wave of up to 10 tasks via cursor-fan.mjs, or the cursor-fanout pipeline (Workflow tool).
 ---
 
 # Cursor-W — orchestrated Cursor fan-out
@@ -113,6 +113,29 @@ from `agent --list-models` — the Grok family is
 `cursor-grok-4.6-{low,medium,high,xhigh}` with an optional `-fast` suffix. Never
 downgrade for "cheap mechanical" work.
 
+### Grok only — no foreign models, ever
+
+**Cursor-W runs the newest Grok models exclusively.** No exceptions, no fallbacks, no
+"just this once because the task is small/large/stuck".
+
+- **Allowed:** the newest Grok family exposed by `agent --list-models`, i.e.
+  `cursor-grok-4.6-*` (currently pinned: `cursor-grok-4.6-high-fast`). When a newer
+  Grok generation ships, the pin moves forward to it — never sideways to another
+  vendor.
+- **Forbidden for every subagent in this skill:** any non-Grok model. That explicitly
+  includes Anthropic (`claude-*`, Opus, Sonnet, Haiku, Fable), OpenAI (`gpt-*`, `o*`,
+  Codex), Google (Gemini), and anything else `agent --list-models` may offer. Passing
+  one is a hard error, not a preference: the runner fails the run rather than silently
+  accepting it.
+- **No silent downgrade either.** An older Grok generation, or a lower-effort slug
+  picked to save money, counts as a violation of the pin just as much as a foreign
+  model does.
+- If the pinned model is unavailable, **stop and report it**. Do not substitute a
+  different model to keep the wave moving — a wave run on the wrong model is not the
+  work that was asked for.
+- This applies to the workers only. The orchestrator is whatever session invoked the
+  skill and is out of scope for this rule.
+
 ## Hard rules
 
 1. **Self-contained prompts.** Subagents share no history with you or each other:
@@ -125,11 +148,15 @@ downgrade for "cheap mechanical" work.
 3. **Read means read** — runner-enforced from the other side: `mode: "read"` may not
    run under `force`, because then nothing keeps it read-only.
 4. **Writers must be disjoint.** Same-file writers must be sequenced with `after`.
-5. **Schema for anything you parse**; act on `structuredOutput`, never on prose.
-6. **Ask for the unguessable**, then check `toolCalls`.
-7. **Never verify by asking the same kind of agent** — sole exception: a *blind*
+5. **Grok only.** Every subagent runs the pinned newest Grok model. Never an
+   Anthropic (Opus/Sonnet/Haiku), OpenAI (GPT/o-series) or any other foreign model,
+   and never an older or lower-effort Grok slug. If the pin cannot be honoured, abort
+   and say so.
+6. **Schema for anything you parse**; act on `structuredOutput`, never on prose.
+7. **Ask for the unguessable**, then check `toolCalls`.
+8. **Never verify by asking the same kind of agent** — sole exception: a *blind*
    verifier that never saw the writer's claims. Run the proof command yourself regardless.
-8. **Never let a subagent block.** End every prompt with: "if something is ambiguous,
+9. **Never let a subagent block.** End every prompt with: "if something is ambiguous,
    state it and pick the most conservative reading — you cannot ask questions."
 
 ## Protocol
@@ -176,7 +203,7 @@ passing anything else fails) · `--strip-workspace-context` (see the task table)
 | `permissionMode` | `force` / `autoReview` / `readonly` / `plan` — writing modes must stay `force` |
 | `stripWorkspaceContext` | strip the harness's own rules and skills from the subagent's context. **Opt-in and server-gated** — see below |
 | `sandbox`, `systemPrompt`, `excludeTools`, `approveMcps` | pass-through overrides; see the caveats below |
-| `model`, `effort`, `maxTurns` | **refused** — the first two are pinned, the third does not exist in this CLI |
+| `model`, `effort`, `maxTurns` | **refused** — the first two are pinned to the newest Grok (no Anthropic/OpenAI/other vendor, no older or lower-effort Grok), the third does not exist in this CLI |
 
 How a mode becomes flags: `read` → `--mode ask` · `plan` → `--plan` ·
 `write`/`shell`/`full` → `--force`. Scope is enforced by permission mode, not by a

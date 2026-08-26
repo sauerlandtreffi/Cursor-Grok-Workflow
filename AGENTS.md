@@ -10,9 +10,11 @@ AGENTS.md-based harnesses.
 ## In one paragraph
 
 Subagents do the labour. You do the thinking. They read, they type, they run commands
-— they never judge their own work, and you never take their word for it. The model is
-pinned to `grok-4.6[effort=high,fast=true]` by the runner. **A subagent result is a
-proposal, never a fact.**
+— they never judge their own work, and you never take their word for it. The worker
+model is pinned by the runner to the newest Grok (`cursor-grok-4.6-high-fast`) and
+**only** Grok: never Anthropic (Opus/Sonnet/Haiku), never OpenAI (GPT/o-series), never
+any other vendor, and never an older or lower-effort Grok slug. **A subagent result is
+a proposal, never a fact.**
 
 ## Prerequisites
 
@@ -58,7 +60,14 @@ directory, that is fine: nothing here depends on being installed. Point yourself
 5. **Verify yourself.** Open the files. Run the proof command. Act only on
    `structuredOutput`, never on prose.
 
-## The five rules you will regret ignoring
+## The six rules you will regret ignoring
+
+0. **Grok only, newest generation.** Every subagent runs the pinned model. Foreign
+   models — Anthropic Opus/Sonnet/Haiku, OpenAI GPT or o-series, Gemini, anything else
+   `agent --list-models` offers — are forbidden outright, as is downgrading to an older
+   or lower-effort Grok. The runner rejects `model` / `effort` fields instead of
+   honouring them. If the pin cannot be met, abort the wave and report it; do not
+   substitute.
 
 1. **Prompts are self-contained.** A subagent has never seen your conversation and
    cannot ask questions. Absolute paths, what to read first, acceptance criteria.
@@ -86,7 +95,7 @@ directory, that is fine: nothing here depends on being installed. Point yourself
 | Structured output | `schema: <JSON Schema>` → parsed and checked; act on `structuredOutput` |
 | Corrective round | `resumeSessionId: "<sessionId from _summary.json>"` — keeps context, so state only what is wrong |
 | Statuses | `ok` · `schema-mismatch` · `skipped` · `unparsable` · `failed` · `timeout` |
-| Refused fields | `model`, `effort` (pinned), `maxTurns` (no such flag in this CLI) |
+| Refused fields | `model`, `effort` (pinned to the newest Grok — no Anthropic/OpenAI/other vendor, no downgrade), `maxTurns` (no such flag in this CLI) |
 | Watch out | the subagent's `PATH` is not yours — Cursor's bundled Node shadows your own. Pin the toolchain by absolute path in proof commands that depend on a version. |
 | Binary override | env `CURSOR_AGENT_ENTRY` |
 

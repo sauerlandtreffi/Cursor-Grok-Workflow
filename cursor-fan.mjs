@@ -6,8 +6,11 @@
 // Runs a dependency-ordered JSON array of Cursor Agent tasks in parallel and
 // writes one distilled result file per task, the raw event stream, and
 // _summary.json. Doctrine and the task-file contract: see SKILL.md.
-// The model is pinned (grok-4.6 at high effort, fast); per-task overrides are
-// refused, and writing modes are refused unless the permission mode is 'force'.
+// The model is pinned to the newest Grok (grok-4.6 at high effort, fast) and only
+// Grok: foreign models (Anthropic claude-*/Opus/Sonnet/Haiku, OpenAI gpt-*/o-series,
+// Gemini, ...) and older or lower-effort Grok slugs are refused, not downgraded to.
+// Per-task overrides are refused, and writing modes are refused unless the permission
+// mode is 'force'.
 //
 // Usage:
 //   node cursor-fan.mjs --tasks-file wave.json --out-dir wave-out \
@@ -55,8 +58,9 @@ const opts = {
 function fail(msg) { console.error(`cursor-fan: ${msg}`); process.exit(2) }
 
 // Accepting only the pinned value makes a wrong call a loud failure, not a
-// silent downgrade to whatever the account's default model happens to be.
-if (opts.model !== MODEL) fail(`--model accepts only '${MODEL}' (got '${opts.model}'). Cursor-W runs that model exclusively.`)
+// silent downgrade to whatever the account's default model happens to be — and it is
+// what keeps a foreign model (Anthropic, OpenAI, ...) out of a Cursor-W wave.
+if (opts.model !== MODEL) fail(`--model accepts only '${MODEL}' (got '${opts.model}'). Cursor-W runs the newest Grok exclusively: no Anthropic (claude/Opus/Sonnet/Haiku), no OpenAI (gpt/o-series), no other vendor, and no downgrade to an older or lower-effort Grok.`)
 const PERM_MODES = ['force', 'autoReview', 'readonly', 'plan']
 if (!PERM_MODES.includes(opts.permissionMode)) {
   fail(`--permission-mode must be ${PERM_MODES.join('|')} (got '${opts.permissionMode}').`)
@@ -124,7 +128,7 @@ for (const t of tasks) {
   if (seen.has(t.id)) fail(`duplicate task id: ${t.id}`)
   // Refuse instead of ignore: a silently dropped field is exactly the class of
   // failure this runner exists to prevent.
-  if (t.model != null) fail(`task '${t.id}': per-task 'model' is not allowed. Cursor-W runs ${MODEL} exclusively; remove the field.`)
+  if (t.model != null) fail(`task '${t.id}': per-task 'model' is not allowed. Cursor-W runs ${MODEL} exclusively — newest Grok only, never a foreign model (Anthropic/OpenAI/other) and never an older Grok; remove the field.`)
   if (t.effort != null) fail(`task '${t.id}': per-task 'effort' is not allowed. Effort is baked into the pinned model id (${MODEL}); remove the field.`)
   if (t.maxTurns != null) fail(`task '${t.id}': 'maxTurns' has no equivalent in the Cursor CLI — there is no --max-turns flag. Bound the task with 'timeoutSec'/--timeout-sec and a narrower slice instead; remove the field.`)
   seen.add(t.id)

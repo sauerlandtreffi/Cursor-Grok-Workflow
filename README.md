@@ -172,7 +172,7 @@ state and the proof command, nothing else.
 
 ---
 
-## The model is pinned
+## The model is pinned — newest Grok, and only Grok
 
 `cursor-grok-4.6-high-fast` — Grok 4.6 at high reasoning effort, fast output.
 
@@ -181,9 +181,28 @@ and the bracket form the `--help` text advertises is not how these ids are writt
 `agent --list-models` gives the real ones
 (`cursor-grok-4.6-{low,medium,high,xhigh}[-fast]`).
 
-The runner **refuses** a per-task `model` or `effort` field rather than ignoring it.
-A silently dropped override is exactly the class of failure this thing exists to
-prevent. There is nothing to configure and nothing to choose.
+**Cursor-W runs the newest Grok models exclusively.** No exceptions, no fallbacks, no
+"just this once".
+
+- **Allowed:** the newest Grok family from `agent --list-models` — `cursor-grok-4.6-*`,
+  currently pinned to `cursor-grok-4.6-high-fast`. When a newer Grok generation ships,
+  the pin moves forward to it — never sideways to another vendor.
+- **Forbidden:** any non-Grok model. Explicitly Anthropic (`claude-*`, Opus, Sonnet,
+  Haiku), OpenAI (`gpt-*`, o-series, Codex), Google (Gemini), and anything else the
+  account may have access to.
+- **No silent downgrade either.** An older Grok generation, or a lower-effort slug
+  picked to save money, violates the pin just as much as a foreign model does. Never
+  downgrade for "cheap mechanical" work.
+- If the pinned model is unavailable, **stop and report it** — a wave run on the wrong
+  model is not the work that was asked for.
+
+The runner **refuses** a per-task `model` or `effort` field, and `--model` accepts only
+the pinned value, rather than ignoring the override. A silently dropped override is
+exactly the class of failure this thing exists to prevent. There is nothing to
+configure and nothing to choose.
+
+(This governs the *workers*. The orchestrator is whatever agent invoked the skill and
+is out of scope.)
 
 ---
 
